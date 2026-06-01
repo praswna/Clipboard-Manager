@@ -1,5 +1,5 @@
 """
-ClipboardManager v10.9
+Clipboard Saver v10.9
 - 세션 복원 / 최대 카드 수 제한 / 팝업 자동닫기 토글
 - 다이얼로그 커스텀 UI 적용 (다크 테마 타이틀바)
 - 이미지 그리기 및 텍스트 수정 시 Ctrl + 마우스 휠 크기 조절(Zoom) 지원
@@ -44,7 +44,7 @@ CARD_TEXT_MIN   = 96
 CARD_TEXT_MAX   = CARD_HEIGHT_IMG
 CARD_SPACING    = 4
 
-SAVE_DIR = os.path.join(os.path.expanduser("~"), "Pictures", "ClipboardManager")
+SAVE_DIR = os.path.join(os.path.expanduser("~"), "Pictures", "ClipboardSaver")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 
@@ -65,15 +65,11 @@ class ClipWorker(QThread):
                 with open(fpath, "w", encoding="utf-8") as f: f.write(self.data)
                 self.finished_new.emit("text", self.content_hash, fpath, fname, f"{len(self.data)}자", self.data)
             elif self.mode == "image":
-                # MD5 해시를 백그라운드에서 계산 (메인 스레드 블로킹 방지)
-                b = self.data.constBits(); b.setsize(self.data.sizeInBytes())
-                h = hashlib.md5(bytes(b)).hexdigest()
-                self.content_hash = h
                 fname = datetime.datetime.now().strftime("clip_%Y%m%d_%H%M%S.png")
                 fpath = os.path.join(self.save_dir, fname)
                 self.data.save(fpath, "PNG")
-                self.finished_new.emit("image", h, fpath, fname, f"{self.data.width()}×{self.data.height()}", self.data)
-        except Exception:
+                self.finished_new.emit("image", self.content_hash, fpath, fname, f"{self.data.width()}×{self.data.height()}", self.data)
+        except Exception: 
             self.finished_err.emit(self.content_hash)
 
 
@@ -81,30 +77,30 @@ class ClipWorker(QThread):
 def is_autostart_enabled():
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
-        winreg.QueryValueEx(key, "ClipboardManager")
+        winreg.QueryValueEx(key, "ClipboardSaver")
         winreg.CloseKey(key); return True
     except OSError: return False
 
 def set_autostart(enable):
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_ALL_ACCESS)
-        if enable: winreg.SetValueEx(key, "ClipboardManager", 0, winreg.REG_SZ, f'"{sys.executable}" "{os.path.abspath(__file__)}"')
+        if enable: winreg.SetValueEx(key, "ClipboardSaver", 0, winreg.REG_SZ, f'"{sys.executable}" "{os.path.abspath(__file__)}"')
         else:
-            try: winreg.DeleteValue(key, "ClipboardManager")
+            try: winreg.DeleteValue(key, "ClipboardSaver")
             except OSError: pass
         winreg.CloseKey(key)
     except Exception: pass
 
 def is_start_minimized():
     try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\ClipboardManager", 0, winreg.KEY_READ)
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\ClipboardSaver", 0, winreg.KEY_READ)
         val, _ = winreg.QueryValueEx(key, "StartMinimized")
         winreg.CloseKey(key); return bool(val)
     except OSError: return False
 
 def set_start_minimized(enable):
     try:
-        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\ClipboardManager")
+        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\ClipboardSaver")
         winreg.SetValueEx(key, "StartMinimized", 0, winreg.REG_DWORD, int(enable))
         winreg.CloseKey(key)
     except Exception: pass
@@ -148,28 +144,9 @@ def make_zoom_icon(size: int, color_hex: str) -> QPixmap:
     p.drawEllipse(m, m, c, c)
     p.drawLine(m + int(c*0.85), m + int(c*0.85), size - m, size - m); p.end(); return px
 
-# ── 아이콘 캐시 (반복 생성 방지) ───────────────────────────────────────────────
-_icon_cache: dict = {}
-
-def _cached_icon() -> QIcon:
-    if "app" not in _icon_cache: _icon_cache["app"] = make_icon()
-    return _icon_cache["app"]
-
-def _cached_pin_icon(size: int, active: bool) -> QIcon:
-    key = ("pin", size, active)
-    if key not in _icon_cache: _icon_cache[key] = make_pin_icon(size, active)
-    return _icon_cache[key]
-
-def _cached_zoom_icon(size: int, color_hex: str) -> QPixmap:
-    key = ("zoom", size, color_hex)
-    if key not in _icon_cache: _icon_cache[key] = make_zoom_icon(size, color_hex)
-    return _icon_cache[key]
-
 class _ResizeGrip(QWidget):
-    """통합 리사이즈 그립. anchor=True면 우하단 고정(메인창), False면 자유 리사이즈(다이얼로그)."""
-    def __init__(self, win, min_w=220, min_h=FIXED_H, anchor=True):
+    def __init__(self, win):
         super().__init__(); self._win = win; self._drag_start = None; self._orig_size = None
-        self._min_w = min_w; self._min_h = min_h; self._anchor = anchor
         self.setFixedSize(14, 14); self.setCursor(QCursor(Qt.CursorShape.SizeFDiagCursor))
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -177,11 +154,9 @@ class _ResizeGrip(QWidget):
     def mouseMoveEvent(self, e):
         if not self._drag_start or not (e.buttons() & Qt.MouseButton.LeftButton): return
         d = e.globalPosition().toPoint() - self._drag_start
-        nw = max(self._min_w, self._orig_size.width() + d.x()); nh = max(self._min_h, self._orig_size.height() + d.y())
-        self._win.resize(nw, nh)
-        if self._anchor:
-            screen = QApplication.primaryScreen().availableGeometry()
-            self._win.move(screen.right() - nw, screen.bottom() - nh)
+        nw = max(220, self._orig_size.width() + d.x()); nh = max(FIXED_H, self._orig_size.height() + d.y())
+        screen = QApplication.primaryScreen().availableGeometry()
+        self._win.resize(nw, nh); self._win.move(screen.right() - nw, screen.bottom() - nh)
     def mouseReleaseEvent(self, e): self._drag_start = None; self._orig_size = None
     def paintEvent(self, e):
         p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -189,8 +164,24 @@ class _ResizeGrip(QWidget):
         for i in range(1, 4): p.drawLine(14 - i*4, 14, 14, 14 - i*4)
         p.end()
 
-# _DialogResizeGrip은 _ResizeGrip(anchor=False)으로 대체됨
-_DialogResizeGrip = lambda win: _ResizeGrip(win, min_w=300, min_h=200, anchor=False)
+class _DialogResizeGrip(QWidget):
+    def __init__(self, win):
+        super().__init__(); self._win = win; self._drag_start = None; self._orig_size = None
+        self.setFixedSize(14, 14); self.setCursor(QCursor(Qt.CursorShape.SizeFDiagCursor))
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = e.globalPosition().toPoint(); self._orig_size = QSize(self._win.width(), self._win.height())
+    def mouseMoveEvent(self, e):
+        if not self._drag_start or not (e.buttons() & Qt.MouseButton.LeftButton): return
+        d = e.globalPosition().toPoint() - self._drag_start
+        nw = max(300, self._orig_size.width() + d.x()); nh = max(200, self._orig_size.height() + d.y())
+        self._win.resize(nw, nh)
+    def mouseReleaseEvent(self, e): self._drag_start = None; self._orig_size = None
+    def paintEvent(self, e):
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(GRAY), 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        for i in range(1, 4): p.drawLine(14 - i*4, 14, 14, 14 - i*4)
+        p.end()
 
 
 # ── 다이얼로그 커스텀 타이틀바 ────────────────────────────────────────────────
@@ -199,9 +190,9 @@ class DialogTitleBar(QWidget):
         super().__init__(win); self._win = win; self.setFixedHeight(28); self.setStyleSheet(f"background:{TITLE};"); self._drag_pos = None
         l = QHBoxLayout(self); l.setContentsMargins(8, 0, 6, 0); l.setSpacing(8)
         
-        icon_lbl = QLabel(); icon_lbl.setPixmap(_cached_icon().pixmap(14, 14))
+        icon_lbl = QLabel(); icon_lbl.setPixmap(make_icon().pixmap(14, 14))
         l.addWidget(icon_lbl)
-
+        
         self.title_lbl = QLabel(title); self.title_lbl.setStyleSheet(f"color:{GRAY}; font-size:10px; font-weight:bold;")
         l.addWidget(self.title_lbl); l.addStretch()
         
@@ -230,11 +221,12 @@ class ZoomTextEdit(QTextEdit):
         self._apply_style()
 
     def _apply_style(self):
-        # 최초 1회만 QSS 전체 적용, 이후 폰트 변경은 _apply_font()로 처리
+        # 폰트 강제 적용 및 탭 간격 4칸으로 설정 (VS Code 스타일)
         font = QFont("Consolas", self.font_size)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.setFont(font)
         self.setTabStopDistance(self.fontMetrics().horizontalAdvance(' ') * 4)
+
         self.setStyleSheet(f"""
             QTextEdit {{
                 background: #1e1e1e;
@@ -250,13 +242,6 @@ class ZoomTextEdit(QTextEdit):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
         """)
 
-    def _apply_font(self):
-        # 휠 줌 시 폰트만 교체 (QSS 전체 파싱 생략)
-        font = QFont("Consolas", self.font_size)
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        self.setFont(font)
-        self.setTabStopDistance(self.fontMetrics().horizontalAdvance(' ') * 4)
-
     def wheelEvent(self, e):
         if e.modifiers() == Qt.KeyboardModifier.ControlModifier:
             delta = e.angleDelta().y()
@@ -264,7 +249,7 @@ class ZoomTextEdit(QTextEdit):
                 self.font_size = min(72, self.font_size + 2)
             elif delta < 0:
                 self.font_size = max(6, self.font_size - 2)
-            self._apply_font()
+            self._apply_style()
             e.accept()
         else:
             super().wheelEvent(e)
@@ -431,23 +416,28 @@ class DrawingDialog(QDialog):
         l.addWidget(self.scroll_area, stretch=1)
 
         btn_row = QHBoxLayout()
-
-        # 중앙 줌 인디케이터
+        
+        # 1. 왼쪽 여백 (비율 1)
+        left_box = QHBoxLayout()
+        btn_row.addLayout(left_box, 1)
+        
+        # 2. 중앙 줌 인디케이터 컨테이너
         self.zoom_container = QWidget()
-        zl = QHBoxLayout(self.zoom_container); zl.setContentsMargins(0,0,0,0); zl.setSpacing(10)
-        self.zoom_icon = QLabel(); self.zoom_icon.setPixmap(_cached_zoom_icon(25, ACCENT))
+        zl = QHBoxLayout(self.zoom_container); zl.setContentsMargins(0,0,0,0); zl.setSpacing(6)
+        self.zoom_icon = QLabel(); self.zoom_icon.setPixmap(make_zoom_icon(22, ACCENT))
         self.zoom_lbl = QLabel("100%"); self.zoom_lbl.setStyleSheet(f"color:{ACCENT}; font-size:20px; font-weight:bold;")
         zl.addWidget(self.zoom_icon); zl.addWidget(self.zoom_lbl)
-
-        btn_done = QPushButton("그리기 완료 (새 클립보드로 생성)")
-        btn_done.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_done.setStyleSheet(f"QPushButton {{ background:{ACCENT}; color:white; padding:8px 16px; border-radius:4px; font-weight:bold; }} QPushButton:hover {{ background:#0f766e; }}")
-        btn_done.clicked.connect(self.accept)
-
-        btn_row.addStretch(1)
         btn_row.addWidget(self.zoom_container, 0, Qt.AlignmentFlag.AlignCenter)
-        btn_row.addStretch(1)
-        btn_row.addWidget(btn_done)
+        
+        # 3. 오른쪽 버튼 (비율 1) - 완벽한 중앙 정렬을 위해 우측으로 밀어냄
+        right_box = QHBoxLayout()
+        right_box.addStretch()
+        btn = QPushButton("그리기 완료 (새 클립보드로 생성)")
+        btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn.setStyleSheet(f"QPushButton {{ background:{ACCENT}; color:white; padding:8px 16px; border-radius:4px; font-weight:bold; }} QPushButton:hover {{ background:#0f766e; }}")
+        btn.clicked.connect(self.accept)
+        right_box.addWidget(btn)
+        btn_row.addLayout(right_box, 1)
 
         l.addLayout(btn_row)
 
@@ -549,7 +539,6 @@ class ClipCard(QWidget):
                  pixmap: QPixmap = None, text_snippet: str = "", card_height: int = CARD_HEIGHT_IMG, meta: str = ""):
         super().__init__()
         self.filepath = filepath; self.mode = mode; self.content_hash = ""; self.pinned = False; self._drag_start = None
-        self._text_cache: str | None = text_snippet if mode == "text" else None  # drag 시 재읽기 방지
         self.setFixedHeight(card_height); self.setStyleSheet(f"background:{BG3}; border-radius:4px;")
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
@@ -623,10 +612,10 @@ class ClipCard(QWidget):
         self.edit_btn.clicked.connect(self._on_edit_clicked)
 
         self.pin_btn = QPushButton(); self.pin_btn.setFixedSize(BTN, BTN); self.pin_btn.setCheckable(True)
-        self.pin_btn.setIcon(_cached_pin_icon(BTN-6, False)); self.pin_btn.setIconSize(QSize(BTN-6, BTN-6))
+        self.pin_btn.setIcon(make_pin_icon(BTN-6, False)); self.pin_btn.setIconSize(QSize(BTN-6, BTN-6))
         self.pin_btn.setStyleSheet(f"QPushButton {{ background:{LINE}; border:none; border-radius:4px; }} QPushButton:checked {{ background:{ACCENT}; }}")
         self.pin_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.pin_btn.toggled.connect(lambda c: (setattr(self, 'pinned', c), self.pin_btn.setIcon(_cached_pin_icon(self._btn_size-6, c)), self.pinned_changed.emit(self, c)))
+        self.pin_btn.toggled.connect(lambda c: (setattr(self, 'pinned', c), self.pin_btn.setIcon(make_pin_icon(self._btn_size-6, c)), self.pinned_changed.emit(self, c)))
 
         del_btn = QPushButton("✕"); del_btn.setFixedSize(BTN, BTN); del_btn.setToolTip("삭제")
         del_btn.setStyleSheet(f"QPushButton {{ background:{LINE}; color:{GRAY}; border:none; font-size:{BTN-10}px; border-radius:4px; }} QPushButton:hover {{ background:#cc4444; color:white; }}")
@@ -654,7 +643,6 @@ class ClipCard(QWidget):
                     QApplication.clipboard().setText(new_text)
                 else:
                     with open(self.filepath, "w", encoding="utf-8") as f: f.write(new_text)
-                    self._text_cache = new_text  # 캐시 갱신
                     al = new_text.splitlines()
                     ch = max(CARD_TEXT_MIN, min(CARD_TEXT_MAX, 8+len(al)*CARD_LINE_H+8))
                     sn = "\n".join(al[:(ch-16)//CARD_LINE_H])
@@ -676,9 +664,7 @@ class ClipCard(QWidget):
         drag = QDrag(self); mime = QMimeData()
         if self.mode == "text":
             try:
-                if self._text_cache is None:
-                    with open(self.filepath, "r", encoding="utf-8") as f: self._text_cache = f.read()
-                mime.setText(self._text_cache)
+                with open(self.filepath, "r", encoding="utf-8") as f: mime.setText(f.read())
             except Exception: pass
         else: mime.setUrls([QUrl.fromLocalFile(self.filepath)])
         drag.setMimeData(mime)
@@ -720,7 +706,7 @@ class ContentPopup(QWidget):
         hl = QHBoxLayout(header); hl.setContentsMargins(10, 0, 6, 0); hl.addStretch()
 
         self.ac_btn = QPushButton(); self.ac_btn.setCheckable(True); self.ac_btn.setChecked(not self.auto_close); self.ac_btn.setFixedSize(22, 20)
-        self.ac_btn.setIcon(_cached_pin_icon(14, self.ac_btn.isChecked()))
+        self.ac_btn.setIcon(make_pin_icon(14, self.ac_btn.isChecked()))
         self.ac_btn.setStyleSheet(f"QPushButton {{ background:transparent; border:none; border-radius:3px; }} QPushButton:checked {{ background:{BG3}; }} QPushButton:hover {{ background:{LINE}; }}")
         self.ac_btn.toggled.connect(self._on_pin_toggled)
         self.ac_btn.setToolTip("자동 닫기 해제 (화면 고정)")
@@ -734,7 +720,7 @@ class ContentPopup(QWidget):
 
     def _on_pin_toggled(self, checked):
         self.auto_close = not checked
-        self.ac_btn.setIcon(_cached_pin_icon(14, checked))
+        self.ac_btn.setIcon(make_pin_icon(14, checked))
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow() and self.auto_close and not self._just_shown:
@@ -809,16 +795,16 @@ class TitleBar(QWidget):
     def __init__(self, win):
         super().__init__(win); self._win = win; self.setFixedHeight(28); self.setStyleSheet(f"background:{TITLE};"); self._drag_pos = None
         l = QHBoxLayout(self); l.setContentsMargins(8, 0, 6, 0); l.setSpacing(4)
-        icon_lbl = QLabel(); icon_lbl.setPixmap(_cached_icon().pixmap(14, 14))
+        icon_lbl = QLabel(); icon_lbl.setPixmap(make_icon().pixmap(14, 14))
         l.addWidget(icon_lbl); l.addStretch()
 
         btn_style = f"QPushButton {{ background:transparent; border:none; border-radius:3px; }} QPushButton:checked {{ background:{BG3}; }} QPushButton:hover {{ background:{LINE}; }}"
         self.power_btn = QPushButton(); self.power_btn.setCheckable(True); self.power_btn.setFixedSize(22, 20); self.power_btn.setStyleSheet(btn_style)
         self.power_btn.setChecked(is_autostart_enabled()); self.power_btn.setIcon(self._make_power_icon(self.power_btn.isChecked())); self.power_btn.clicked.connect(self._toggle_power)
-
+        
         self.min_btn = QPushButton(); self.min_btn.setCheckable(True); self.min_btn.setFixedSize(22, 20); self.min_btn.setStyleSheet(btn_style)
         self.min_btn.setChecked(is_start_minimized()); self.min_btn.setIcon(self._make_tray_icon(self.min_btn.isChecked())); self.min_btn.clicked.connect(self._toggle_min)
-
+        
         self.top_btn = QPushButton(); self.top_btn.setCheckable(True); self.top_btn.setFixedSize(22, 20); self.top_btn.setStyleSheet(btn_style)
         self.top_btn.setChecked(True); self.top_btn.setIcon(self._make_pin_icon(True)); self.top_btn.clicked.connect(self._toggle_top)
 
@@ -832,30 +818,19 @@ class TitleBar(QWidget):
         l.addWidget(self.power_btn); l.addWidget(self.min_btn); l.addWidget(self.top_btn); l.addWidget(win_min_btn); l.addWidget(close_btn)
 
     def _make_pin_icon(self, active):
-        key = ("tb_pin", active)
-        if key not in _icon_cache:
-            px = QPixmap(14,14); px.fill(Qt.GlobalColor.transparent); p = QPainter(px); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            c = QColor(ACCENT) if active else QColor(GRAY)
-            p.setPen(QPen(c,1.5,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap)); p.setBrush(QBrush(c) if active else Qt.BrushStyle.NoBrush)
-            p.drawEllipse(3,1,8,7); p.drawLine(7,8,7,13); p.end(); _icon_cache[key] = QIcon(px)
-        return _icon_cache[key]
-
+        px = QPixmap(14,14); px.fill(Qt.GlobalColor.transparent); p = QPainter(px); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = QColor(ACCENT) if active else QColor(GRAY)
+        p.setPen(QPen(c,1.5,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap)); p.setBrush(QBrush(c) if active else Qt.BrushStyle.NoBrush)
+        p.drawEllipse(3,1,8,7); p.drawLine(7,8,7,13); p.end(); return QIcon(px)
     def _make_power_icon(self, active):
-        key = ("tb_power", active)
-        if key not in _icon_cache:
-            px = QPixmap(14,14); px.fill(Qt.GlobalColor.transparent); p = QPainter(px); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            c = QColor(ACCENT) if active else QColor(GRAY)
-            p.setPen(QPen(c,1.5,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap)); p.drawArc(2,2,10,10,120*16,300*16); p.drawLine(7,2,7,6); p.end(); _icon_cache[key] = QIcon(px)
-        return _icon_cache[key]
-
+        px = QPixmap(14,14); px.fill(Qt.GlobalColor.transparent); p = QPainter(px); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = QColor(ACCENT) if active else QColor(GRAY)
+        p.setPen(QPen(c,1.5,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap)); p.drawArc(2,2,10,10,120*16,300*16); p.drawLine(7,2,7,6); p.end(); return QIcon(px)
     def _make_tray_icon(self, active):
-        key = ("tb_tray", active)
-        if key not in _icon_cache:
-            px = QPixmap(14,14); px.fill(Qt.GlobalColor.transparent); p = QPainter(px); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            c = QColor(ACCENT) if active else QColor(GRAY)
-            p.setPen(QPen(c, 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            p.drawRect(1, 1, 8, 7); p.drawLine(1, 4, 9, 4); p.drawLine(11, 7, 11, 12); p.drawLine(9, 10, 11, 12); p.drawLine(13, 10, 11, 12); p.end(); _icon_cache[key] = QIcon(px)
-        return _icon_cache[key]
+        px = QPixmap(14,14); px.fill(Qt.GlobalColor.transparent); p = QPainter(px); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = QColor(ACCENT) if active else QColor(GRAY)
+        p.setPen(QPen(c, 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.drawRect(1, 1, 8, 7); p.drawLine(1, 4, 9, 4); p.drawLine(11, 7, 11, 12); p.drawLine(9, 10, 11, 12); p.drawLine(13, 10, 11, 12); p.end(); return QIcon(px)
 
     def _toggle_power(self, c): self.power_btn.setIcon(self._make_power_icon(c)); set_autostart(c)
     def _toggle_min(self, c): self.min_btn.setIcon(self._make_tray_icon(c)); set_start_minimized(c)
@@ -876,7 +851,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.setWindowTitle("ClipboardManager")
+        self.setWindowTitle("Clipboard Saver")
         self.setWindowIcon(make_icon())
         self.setStyleSheet(f"QMainWindow {{ background:{BG}; }}")
         self.setMinimumSize(220, FIXED_H)
@@ -886,14 +861,10 @@ class MainWindow(QMainWindow):
         self.dot_visible = True
         self.cards: list[ClipCard] = []
         
-        self._content_hashes = {}
+        self._content_hashes = {}     
         self._workers = []
         self._caps_was_down = False
-        self._internal_copy_time = 0.0
-        self._last_hash = ""
-        self._last_quick_key = None
-        self._last_hash_time = 0.0
-        self._resize_pending = False  # debounce 플래그
+        self._internal_copy_time = 0
 
         self.popup = ContentPopup()
         self.resize(WIN_W, FIXED_H)
@@ -903,15 +874,11 @@ class MainWindow(QMainWindow):
         self._setup_tray()
         self._resize_window()
 
-    def _schedule_resize(self):
-        self._resize_window()
-
     def _resize_window(self):
-        screen = QApplication.primaryScreen().availableGeometry()
         n = len(self.cards); scroll_h = 12 + sum(c.height() for c in self.cards) + (n-1)*CARD_SPACING if n > 0 else 20
-        new_h = min(FIXED_H + scroll_h, screen.height() - 40)
+        new_h = min(FIXED_H + scroll_h, QApplication.primaryScreen().availableGeometry().height() - 40)
         w = max(self.width(), 220)
-        self.resize(w, new_h); self.move(screen.right() - w, screen.bottom() - new_h)
+        self.resize(w, new_h); self.move(QApplication.primaryScreen().availableGeometry().right() - w, QApplication.primaryScreen().availableGeometry().bottom() - new_h)
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:
@@ -985,9 +952,9 @@ class MainWindow(QMainWindow):
         except Exception: self.path_edit.setText(self.save_dir)
 
     def _setup_tray(self):
-        self.tray = QSystemTrayIcon(_cached_icon(), self)
+        self.tray = QSystemTrayIcon(make_icon(), self)
         menu = QMenu()
-        show_act = QAction("열기", self); show_act.triggered.connect(lambda: (self.show(), self.raise_(), self.activateWindow(), self._schedule_resize()))
+        show_act = QAction("열기", self); show_act.triggered.connect(lambda: (self.show(), self.raise_(), self.activateWindow(), self._resize_window()))
         quit_act = QAction("종료", self); quit_act.triggered.connect(QApplication.quit)
         menu.addAction(show_act); menu.addSeparator(); menu.addAction(quit_act)
         self.tray.setContextMenu(menu); self.tray.activated.connect(lambda r: show_act.trigger() if r == QSystemTrayIcon.ActivationReason.DoubleClick else None)
@@ -1009,11 +976,11 @@ class MainWindow(QMainWindow):
         self.mouse_track_timer = QTimer(); self.mouse_track_timer.timeout.connect(self._track_mouse_for_passthrough)
         
         self._caps_poll = QTimer(); self._caps_poll.timeout.connect(self._poll_capslock)
-        self._caps_poll.start(250)  # 120ms→250ms: 체감 차이 없고 CPU 절약
+        self._caps_poll.start(120)
 
     def _blink_dot(self):
         self.dot_visible = not self.dot_visible
-        self.status_dot.setVisible(self.dot_visible)
+        self.status_dot.setStyleSheet(f"color:{ACCENT if self.dot_visible else BG}; font-size:10px;")
 
     def _poll_capslock(self):
         down = bool(ctypes.windll.user32.GetAsyncKeyState(VK_CAPITAL) & 0x8000)
@@ -1028,38 +995,44 @@ class MainWindow(QMainWindow):
             if not px.isNull(): self.clipboard.setPixmap(px)
         else:
             try:
-                if card._text_cache is None:
-                    with open(card.filepath, "r", encoding="utf-8") as f: card._text_cache = f.read()
-                self.clipboard.setText(card._text_cache)
+                with open(card.filepath, "r", encoding="utf-8") as f: self.clipboard.setText(f.read())
             except Exception: pass
 
     def _check_clipboard(self):
-        # 내부 복사(카드 클릭) 후 1.0초 이내 이벤트는 무시 (blockSignals 없이 처리)
+        # 디바운스 대기 시간을 고려하여 내부 복사 무시 시간을 0.5초에서 1.0초로 연장
         if time.time() - self._internal_copy_time < 1.0: return
 
         try:
+            self.clipboard.blockSignals(True)
             img = self.clipboard.image()
-
+            
             if not img.isNull():
-                img_copy = img.copy()
-                # 빠른 중복 감지: 크기 + 샘플 픽셀로 경량 키 생성 (메인 스레드, 블로킹 없음)
-                w, h_px = img_copy.width(), img_copy.height()
-                sample = img_copy.pixel(w // 2, h_px // 2) if w > 0 and h_px > 0 else 0
-                quick_key = (w, h_px, img_copy.sizeInBytes(), sample)
-
-                if quick_key == self._last_quick_key and time.time() - self._last_hash_time < 1.5:
+                # 메인 스레드에서 즉시 해시를 계산하여 중복 감지 레이스 컨디션 완벽 차단
+                b = img.constBits(); b.setsize(img.sizeInBytes())
+                h = hashlib.md5(b.asarray()).hexdigest()
+                
+                # OS 캡처 도구의 지연된 중복 이벤트는 UI 업데이트 없이 즉시 무시 (1.5초 이내)
+                if h == getattr(self, '_last_hash', '') and time.time() - getattr(self, '_last_hash_time', 0) < 1.5:
                     return
-                self._last_quick_key = quick_key; self._last_hash_time = time.time()
+                self._last_hash = h; self._last_hash_time = time.time()
 
-                # 워커에서 MD5 해시 계산 + 파일 저장 (백그라운드)
-                worker = ClipWorker("image", img_copy, self.save_dir, "")
+                if h in self._content_hashes:
+                    card = self._content_hashes[h]
+                    if card: # None이면 아직 워커에서 이미지 파일 저장(인코딩) 중인 상태
+                        self._move_to_top(card)
+                        pop_card = self.popup.get_card_by_path(card.filepath)
+                        if pop_card: self.popup.move_card_to_top(pop_card)
+                    return
+                
+                self._content_hashes[h] = None # 처리 중 상태로 딕셔너리에 먼저 선점 등록
+                worker = ClipWorker("image", img.copy(), self.save_dir, h)
                 self._start_worker(worker)
             else:
                 text = self.clipboard.text()
                 if text and text.strip():
                     h = hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()
-
-                    if h == self._last_hash and time.time() - self._last_hash_time < 1.5:
+                    
+                    if h == getattr(self, '_last_hash', '') and time.time() - getattr(self, '_last_hash_time', 0) < 1.5:
                         return
                     self._last_hash = h; self._last_hash_time = time.time()
 
@@ -1070,13 +1043,15 @@ class MainWindow(QMainWindow):
                             pop_card = self.popup.get_card_by_path(card.filepath)
                             if pop_card: self.popup.move_card_to_top(pop_card)
                         return
-
+                    
                     self._content_hashes[h] = None
                     worker = ClipWorker("text", text, self.save_dir, h)
                     self._start_worker(worker)
-
+                    
         except Exception:
             pass
+        finally:
+            self.clipboard.blockSignals(False)
 
     def _start_worker(self, worker):
         worker.finished_new.connect(self._on_worker_new)
@@ -1086,20 +1061,6 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_worker_new(self, mode, h, fpath, fname, meta, data):
-        if mode == "image":
-            # 워커에서 계산된 해시로 중복 체크 (백그라운드 해시 계산 결과 반영)
-            if h in self._content_hashes:
-                card = self._content_hashes[h]
-                if card:
-                    self._move_to_top(card)
-                    pop_card = self.popup.get_card_by_path(card.filepath)
-                    if pop_card: self.popup.move_card_to_top(pop_card)
-                # 중복이므로 저장된 파일 제거
-                try:
-                    if os.path.exists(fpath): os.remove(fpath)
-                except Exception: pass
-                return
-            self._content_hashes[h] = None  # 선점 등록
         self.current_filepath = fpath
         if mode == "image":
             px = QPixmap.fromImage(data)
@@ -1126,7 +1087,7 @@ class MainWindow(QMainWindow):
         self.cards_layout.insertWidget(pinned, card); self.cards.insert(pinned, card)
         if content_hash: self._content_hashes[content_hash] = card
         self._trim_cards()
-        if _resize: self._schedule_resize()
+        if _resize: self._resize_window()
         return card
 
     def _on_pin_changed(self, card, is_pinned):
@@ -1137,13 +1098,13 @@ class MainWindow(QMainWindow):
         self.cards.remove(card); self.cards_layout.removeWidget(card)
         pinned = sum(1 for c in self.cards if c.pinned)
         self.cards_layout.insertWidget(pinned, card); self.cards.insert(pinned, card)
-        self._schedule_resize()
+        self._resize_window()
 
     def _on_card_delete(self, card):
         if card.content_hash in self._content_hashes: del self._content_hashes[card.content_hash]
         if self.current_filepath == card.filepath: self.current_filepath = None
         if card in self.cards: self.cards.remove(card)
-        card.setParent(None); card.deleteLater(); self._schedule_resize()
+        card.setParent(None); card.deleteLater(); QTimer.singleShot(0, self._resize_window)
 
     def _clear_all(self):
         to_remove = [c for c in self.cards if not c.pinned]
@@ -1156,7 +1117,7 @@ class MainWindow(QMainWindow):
             if card in self.popup.cards: self.popup.cards.remove(card)
             self.popup.cards_layout.removeWidget(card); card.setParent(None); card.deleteLater()
 
-        self._schedule_resize(); self.popup._resize_popup() if self.popup.isVisible() else None
+        self._resize_window(); self.popup._resize_popup() if self.popup.isVisible() else None
 
     def _trim_cards(self):
         while len(self.cards) > MAX_CARDS:
@@ -1171,19 +1132,18 @@ class MainWindow(QMainWindow):
 
     def _minimize_to_tray(self):
         self.hide()
-        self.tray.showMessage("ClipboardManager", "트레이에서 실행 중입니다.", QSystemTrayIcon.MessageIcon.Information, 2000)
+        self.tray.showMessage("Clipboard Saver", "트레이에서 실행 중입니다.", QSystemTrayIcon.MessageIcon.Information, 2000)
 
 def main():
-    import traceback, logging
-    logging.basicConfig(filename=os.path.join(os.path.dirname(__file__), "error_log.txt"),
-                        level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
-    try:
-        _main()
-    except Exception:
-        logging.exception("FATAL ERROR")
-        raise
-
-def _main():
     app = QApplication(sys.argv); app.setQuitOnLastWindowClosed(False); app.setStyle("Fusion")
     palette = QPalette()
-    palette.setColor(QPalet
+    palette.setColor(QPalette.ColorRole.Window, QColor(BG)); palette.setColor(QPalette.ColorRole.WindowText, QColor(ACCENT))
+    palette.setColor(QPalette.ColorRole.Base, QColor(BG2)); palette.setColor(QPalette.ColorRole.AlternateBase, QColor(BG3))
+    palette.setColor(QPalette.ColorRole.Text, QColor(ACCENT)); palette.setColor(QPalette.ColorRole.Button, QColor(BG3))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(ACCENT)); app.setPalette(palette)
+    win = MainWindow()
+    if is_start_minimized(): QTimer.singleShot(0, lambda: (win.show(), win.hide()))
+    else: win.show()
+    sys.exit(app.exec())
+
+if __name__ == "__main__": main()

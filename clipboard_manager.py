@@ -210,7 +210,7 @@ def get_hotkey_vk() -> int:
         winreg.CloseKey(key)
         return int(val)
     except OSError:
-        return 0x14  # 기본값: CapsLock
+        return 0x72  # 기본값: F3
 
 
 def set_hotkey_vk(vk: int):
@@ -1347,9 +1347,183 @@ class ClipCard(QFrame):
                 self.request_copy.emit(self)
         self._drag_start = None
 
+# ── 토스트 알림 팝업 ──────────────────────────────────────────────────────────
+class ToastItem(QWidget):
+    """개별 토스트 알림 카드. 드래그로 내용을 복사할 수 있다."""
+
+    TOAST_W = 260
+    MARGIN   = 8
+    GAP      = 6
+
+    closed = pyqtSignal(object)   # 닫힐 때 자신을 매니저에 알림
+
+    def __init__(self, mode: str, text: str = "", pixmap: QPixmap = None):
+        super().__init__()
+        self.mode    = mode
+        self._text   = text
+        self._pixmap = pixmap
+        self._drag_start = None
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFixedWidth(self.TOAST_W)
+        self.setStyleSheet(f"""
+            ToastItem {{
+                background:{BG3};
+                border:1px solid {LINE};
+                border-radius:6px;
+            }}
+        """)
+
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self._on_timeout)
+
+        self._build_ui(mode, text, pixmap)
+        self.adjustSize()
+
+    def _build_ui(self, mode, text, pixmap):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 8, 10, 10)
+        root.setSpacing(6)
+
+        # 헤더
+        hl = QHBoxLayout()
+        hl.setContentsMargins(0, 0, 0, 0)
+        dot = QLabel("●")
+        dot.setStyleSheet(f"color:{ACCENT}; font-size:8px;")
+        lbl = QLabel("클립보드 복사됨")
+        lbl.setStyleSheet(f"color:{ACCENT}; font-size:9px; font-weight:bold;")
+        hint = QLabel("드래그하여 붙여넣기")
+        hint.setStyleSheet(f"color:{GRAY}; font-size:9px;")
+        hl.addWidget(dot)
+        hl.addWidget(lbl)
+        hl.addStretch()
+        hl.addWidget(hint)
+        root.addLayout(hl)
+
+        # 구분선
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet(f"background:{LINE}; max-height:1px;")
+        root.addWidget(line)
+
+        if mode == "text":
+            lines = text.splitlines()
+            preview = "\n".join(lines[:5])
+            if len(lines) > 5 or len(preview) > 220:
+                preview = preview[:220].rstrip() + " …"
+            content = QLabel(preview)
+            content.setWordWrap(True)
+            content.setStyleSheet("""
+                color:#d4d4d4;
+                font-family: Consolas, monospace;
+                font-size:11px;
+                background:#1e1e1e;
+                border-radius:3px;
+                padding:6px;
+            """)
+            content.setMaximumHeight(90)
+            content.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            root.addWidget(content)
+        else:
+            thumb = pixmap.scaled(
+                238, 80,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            content = QLabel()
+            content.setPixmap(thumb)
+            content.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            content.setStyleSheet("background:#1e1e1e; border-radius:3px; padding:4px;")
+            content.setFixedHeight(thumb.height() + 8)
+            root.addWidget(content)
+
+    # ── 드래그 복사 ──────────────────────────────────────────────────────────────
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = e.globalPosition().toPoint()
+
+    def mouseMoveEvent(self, e):
+        if not self._drag_start or not (e.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if (e.globalPosition().toPoint() - self._drag_start).manhattanLength() < 8:
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        if self.mode == "text":
+            mime.setText(self._text)
+        else:
+            mime.setImageData(self._pixmap.toImage())
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction)
+        self._drag_start = None
+
+    def mouseReleaseEvent(self, e):
+        self._drag_start = None
+
+    # ── 타이머 / 닫기 ────────────────────────────────────────────────────────────
+    def start_timer(self, ms: int = 3000):
+        self._hide_timer.start(ms)
+
+    def _on_timeout(self):
+        self.hide()
+        self.closed.emit(self)
+
+
+class ToastManager:
+    """여러 ToastItem을 우하단에 위로 쌓아 표시하는 관리자."""
+
+    MARGIN = 8
+    GAP    = 6
+
+    def __init__(self):
+        self._items: list[ToastItem] = []
+
+    def show_text(self, text: str):
+        self._add(ToastItem("text", text=text))
+
+    def show_image(self, pixmap: QPixmap):
+        self._add(ToastItem("image", pixmap=pixmap))
+
+    def _add(self, item: ToastItem):
+        item.closed.connect(self._on_closed)
+        self._items.append(item)
+        self._reposition()
+        item.show()
+        item.raise_()
+        item.start_timer(7000)
+
+    def _on_closed(self, item: ToastItem):
+        if item in self._items:
+            self._items.remove(item)
+        item.deleteLater()
+        self._reposition()
+
+    def _reposition(self):
+        """쌓인 순서대로 우하단에서 위쪽으로 배치한다."""
+        screen = QApplication.primaryScreen().availableGeometry()
+        y = screen.bottom() - self.MARGIN
+        for item in reversed(self._items):
+            item.adjustSize()
+            y -= item.height()
+            x = screen.right() - item.width() - self.MARGIN
+            item.move(x, y)
+            y -= self.GAP
+
+
 # ── 콘텐츠 팝업 ───────────────────────────────────────────────────────────────
 class ContentPopup(QWidget):
     """단축키를 누를 때 커서 근처에 표시되는 클립보드 히스토리 팝업 창."""
+
+    # 팝업에서 발생한 카드 변경을 MainWindow에 알리는 신호
+    card_deleted_signal = pyqtSignal(str)   # filepath
+    card_pinned_signal  = pyqtSignal(str, bool)  # filepath, is_pinned
 
     def __init__(self):
         super().__init__()
@@ -1420,6 +1594,12 @@ class ContentPopup(QWidget):
         """핀 버튼 토글 시 자동 닫기 여부를 전환한다."""
         self.auto_close = not checked
         self.ac_btn.setIcon(make_pin_icon(14, checked))
+        
+        # 핀이 해제되어 자동 닫기가 켜지고 창이 표시 중이라면 폴링 타이머를 다시 시작한다.
+        if self.auto_close and self.isVisible():
+            self._focus_poll.start(80)
+        else:
+            self._focus_poll.stop()
 
     def changeEvent(self, event):
         """WindowDoesNotAcceptFocus 플래그로 포커스를 받지 않으므로 ActivationChange 미사용."""
@@ -1490,7 +1670,8 @@ class ContentPopup(QWidget):
         self.cards.insert(pinned, card)
 
     def _on_pin_changed(self, card, is_pinned):
-        """카드가 고정되면 목록 최상단으로 이동시킨다."""
+        """카드가 고정되면 목록 최상단으로 이동시키고 MainWindow에 알린다."""
+        self.card_pinned_signal.emit(card.filepath, is_pinned)
         if not is_pinned:
             return
         self.cards.remove(card)
@@ -1499,7 +1680,8 @@ class ContentPopup(QWidget):
         self.cards.insert(0, card)
 
     def _on_card_delete(self, card):
-        """카드 삭제 요청 처리 후 팝업 크기를 재조정한다."""
+        """카드 삭제 요청 처리 후 팝업 크기를 재조정하고 MainWindow에 알린다."""
+        self.card_deleted_signal.emit(card.filepath)
         if card in self.cards:
             self.cards.remove(card)
         card.setParent(None)
@@ -1519,8 +1701,14 @@ class ContentPopup(QWidget):
 
     def show_at_cursor(self):
         """현재 커서 위치를 기준으로 팝업을 표시한다. 기존 포커스는 유지된다."""
+        # 팝업을 열기 전 포커스를 가진 창의 HWND를 저장 → 붙여넣기 대상으로 사용
+        self._prev_hwnd = ctypes.windll.user32.GetForegroundWindow()
         pos = QCursor.pos()
-        screen = QApplication.primaryScreen().availableGeometry()
+        
+        # 커서가 위치한 모니터 화면의 영역을 가져옴 (멀티 모니터 지원)
+        screen_obj = QApplication.screenAt(pos) or QApplication.primaryScreen()
+        screen = screen_obj.availableGeometry()
+        
         self._anchor_x = max(screen.left(), min(pos.x(), screen.right() - WIN_W))
         self._anchor_y = pos.y()
         self._resize_popup()
@@ -1538,16 +1726,35 @@ class ContentPopup(QWidget):
             self._focus_poll.start(80)
 
     def _resize_popup(self):
-        """카드 수와 높이에 따라 팝업 창 크기를 동적으로 재계산한다."""
+        """카드 수와 높이에 따라 팝업 창 크기를 동적으로 재계산한다.
+        커서 아래 공간이 부족하면 커서 위쪽으로 팝업을 표시한다."""
         n = len(self.cards)
         content_h = (
             12 + sum(c.height() for c in self.cards) + (n - 1) * CARD_SPACING
             if n > 0
             else 40
         )
-        max_h = max(60, QApplication.primaryScreen().availableGeometry().bottom() - self._anchor_y - 10)
-        self.resize(WIN_W, min(content_h + 32, max_h))
-        self.move(self._anchor_x, self._anchor_y)
+        ideal_h = content_h + 32
+        
+        # 앵커 좌표가 위치한 모니터 화면의 영역을 가져옴
+        pos = QPoint(self._anchor_x, self._anchor_y)
+        screen_obj = QApplication.screenAt(pos) or QApplication.primaryScreen()
+        screen = screen_obj.availableGeometry()
+
+        space_below = screen.bottom() - self._anchor_y - 10
+        space_above = self._anchor_y - screen.top() - 10
+
+        if space_below >= min(ideal_h, 100) or space_below >= space_above:
+            # 커서 아래에 표시
+            popup_h = min(ideal_h, max(60, space_below))
+            popup_y = self._anchor_y
+        else:
+            # 커서 위에 표시 (아래 공간이 부족할 때)
+            popup_h = min(ideal_h, max(60, space_above))
+            popup_y = self._anchor_y - popup_h
+
+        self.resize(WIN_W, popup_h)
+        self.move(self._anchor_x, popup_y)
 
 
 # ── 커스텀 타이틀바 ────────────────────────────────────────────────────────────
@@ -1644,6 +1851,8 @@ class TitleBar(QWidget):
         self._drag_pos = None
 
 
+
+
 # ── 메인 창 ───────────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
     """클립보드 매니저의 메인 창 — 카드 목록, 트레이, 단축키 폴링을 관리한다."""
@@ -1666,11 +1875,13 @@ class MainWindow(QMainWindow):
 
         self._content_hashes = {}       # 콘텐츠 해시 → ClipCard 매핑 (중복 감지용)
         self._workers = []              # 실행 중인 ClipWorker 목록
-        self._caps_was_down = False     # 이전 프레임의 단축키 누름 상태
         self._hotkey_vk = get_hotkey_vk()
         self._internal_copy_time = 0   # 내부 복사 시각 (클립보드 루프 방지용)
 
         self.popup = ContentPopup()
+        self.popup.card_deleted_signal.connect(self._on_popup_card_deleted)
+        self.popup.card_pinned_signal.connect(self._on_popup_card_pinned)
+        self.toast = ToastManager()
         self.resize(WIN_W, FIXED_H)
 
         self._build_ui()
@@ -1891,9 +2102,11 @@ class MainWindow(QMainWindow):
         self.blink_timer.timeout.connect(self._blink_dot)
         self.blink_timer.start(900)
 
+        self._caps_was_down = False
+        self._caps_toggle_state = bool(ctypes.windll.user32.GetKeyState(0x14) & 0x0001)
         self._caps_poll = QTimer()
-        self._caps_poll.timeout.connect(self._poll_capslock)
-        self._caps_poll.start(120)
+        self._caps_poll.timeout.connect(self._poll_hotkey)
+        self._caps_poll.start(50)
 
     def _blink_dot(self):
         """상태 표시 점을 교대로 켜고 끈다."""
@@ -1903,26 +2116,35 @@ class MainWindow(QMainWindow):
         )
 
     def _on_hotkey_changed(self, vk: int):
-        """단축키가 변경되면 내부 VK 코드를 갱신하고 이전 상태를 초기화한다."""
+        """단축키 변경 시 VK 코드를 갱신하고 상태를 초기화한다."""
         self._hotkey_vk = vk
         self._caps_was_down = False
+        self._caps_toggle_state = bool(ctypes.windll.user32.GetKeyState(vk) & 0x0001)
 
-    def _poll_capslock(self):
-        """단축키 상태를 폴링하여 팝업 표시/숨김을 토글한다.
+    def _poll_hotkey(self):
+        """50ms 마다 단축키 상태를 폴링하여 팝업을 토글한다.
 
-        0x8000 비트: 현재 눌려있는지 여부
-        0x0001 비트: 마지막 호출 이후 눌렸다 떼진 적 있는지 여부 (빠른 입력 감지)
-        두 비트 중 하나라도 감지되면 토글 처리한다.
+        CapsLock(0x14): 토글 상태 변화만 감지 (물리 누름과 중복 방지)
+        일반 키: 물리 누름 엣지 + 빠른 입력(0x0001 비트) 감지
         """
-        state = ctypes.windll.user32.GetAsyncKeyState(self._hotkey_vk)
-        currently_down = bool(state & 0x8000)
-        toggled_since_last = bool(state & 0x0001)
+        vk = self._hotkey_vk
 
-        # 현재 눌림(엣지) 또는 폴링 사이에 눌렸다 떼진 경우 모두 처리
-        if (currently_down and not self._caps_was_down) or (toggled_since_last and not currently_down):
-            self.popup.hide() if self.popup.isVisible() else self.popup.show_at_cursor()
+        if vk == 0x14:
+            # CapsLock 전용 — 토글 ON/OFF 변화만으로 정확히 1회 감지
+            toggle = bool(ctypes.windll.user32.GetKeyState(vk) & 0x0001)
+            if toggle != self._caps_toggle_state:
+                self._caps_toggle_state = toggle
+                self.popup.hide() if self.popup.isVisible() else self.popup.show_at_cursor()
+        else:
+            # 일반 키: 물리 누름 엣지 감지
+            state = ctypes.windll.user32.GetAsyncKeyState(vk)
+            currently_down = bool(state & 0x8000)
+            pressed_since_last = bool(state & 0x0001)
 
-        self._caps_was_down = currently_down
+            if (currently_down and not self._caps_was_down) or (pressed_since_last and not currently_down):
+                self.popup.hide() if self.popup.isVisible() else self.popup.show_at_cursor()
+
+            self._caps_was_down = currently_down
 
     def _on_card_copy_requested(self, card: ClipCard):
         """카드의 복사 요청을 처리하여 클립보드에 설정하고 즉시 붙여넣기한다."""
@@ -1946,44 +2168,18 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
                 
-        # 팝업에서 클릭한 경우: 팝업을 닫지 않고 원래 포커스가 있던 창으로 Ctrl+V를 전송
+        # 팝업에서 클릭한 경우: 팝업을 닫고 Ctrl+V 전송
         if self.popup.isVisible():
-            QTimer.singleShot(120, self._send_paste)
+            self.popup.hide()
+            QTimer.singleShot(80, self._send_paste)
 
     def _send_paste(self):
-        """이전 포커스 창에 Ctrl+V 키 입력을 SendInput으로 전송한다."""
-
-        # INPUT 구조체 정의
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [
-                ("wVk", ctypes.c_ushort),
-                ("wScan", ctypes.c_ushort),
-                ("dwFlags", ctypes.c_ulong),
-                ("time", ctypes.c_ulong),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-            ]
-
-        class INPUT(ctypes.Structure):
-            _fields_ = [("type", ctypes.c_ulong), ("ki", KEYBDINPUT)]
-
-        VK_CONTROL = 0x11
-        VK_V = 0x56
-        KEYEVENTF_KEYUP = 0x0002
-        INPUT_KEYBOARD = 1
-
-        def make_key(vk, flags=0):
-            i = INPUT()
-            i.type = INPUT_KEYBOARD
-            i.ki = KEYBDINPUT(vk, 0, flags, 0, None)
-            return i
-
-        inputs = (INPUT * 4)(
-            make_key(VK_CONTROL),            # Ctrl 누름
-            make_key(VK_V),                  # V 누름
-            make_key(VK_V, KEYEVENTF_KEYUP),        # V 뗌
-            make_key(VK_CONTROL, KEYEVENTF_KEYUP), # Ctrl 뗌
-        )
-        ctypes.windll.user32.SendInput(4, inputs, ctypes.sizeof(INPUT))
+        """현재 포커스 창에 Ctrl+V를 keybd_event로 전송한다."""
+        k = ctypes.windll.user32.keybd_event
+        k(0x11, 0, 0, 0)   # Ctrl 누름
+        k(0x56, 0, 0, 0)   # V 누름
+        k(0x56, 0, 2, 0)   # V 뗌
+        k(0x11, 0, 2, 0)   # Ctrl 뗌
 
     def _check_clipboard(self):
         """클립보드 변경을 감지하여 이미지/텍스트를 비동기 워커에 전달한다."""
@@ -2064,18 +2260,20 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_worker_new(self, mode, h, fpath, fname, meta, data):
-        """워커가 파일 저장을 완료하면 메인 창과 팝업에 카드를 추가한다."""
+        """워커가 파일 저장을 완료하면 메인 창과 팝업에 카드를 추가하고 토스트를 띄운다."""
         self.current_filepath = fpath
         if mode == "image":
             px = QPixmap.fromImage(data)
             self._add_card("image", fpath, fname, pixmap=px, card_height=CARD_HEIGHT_IMG, content_hash=h, meta=meta)
             pop_card = self.popup.add_card("image", fpath, fname, pixmap=px, card_height=CARD_HEIGHT_IMG, meta=meta)
+            self.toast.show_image(px)
         else:
             al = data.splitlines()
             ch = max(CARD_TEXT_MIN, min(CARD_TEXT_MAX, 8 + len(al) * CARD_LINE_H + 8))
             sn = "\n".join(al[:(ch - 16) // CARD_LINE_H])
             self._add_card("text", fpath, fname, text_snippet=sn, card_height=ch, content_hash=h, meta=meta)
             pop_card = self.popup.add_card("text", fpath, fname, text_snippet=sn, card_height=ch, meta=meta)
+            self.toast.show_text(data)
 
         pop_card.request_copy.connect(self._on_card_copy_requested)
 
@@ -2111,9 +2309,14 @@ class MainWindow(QMainWindow):
         return card
 
     def _on_pin_changed(self, card, is_pinned):
-        """카드가 고정되면 목록 최상단으로 이동시킨다."""
+        """카드가 고정되면 목록 최상단으로 이동시키고 팝업 카드에도 반영한다."""
         if is_pinned:
             self._move_to_top(card)
+        # 팝업의 동일 카드 핀 상태 동기화
+        pop_card = next((c for c in self.popup.cards if c.filepath == card.filepath), None)
+        if pop_card and pop_card.pinned != is_pinned:
+            pop_card.pinned = is_pinned
+            pop_card.pin_btn.setChecked(is_pinned)
 
     def _move_to_top(self, card):
         """카드를 고정 카드 바로 아래 최상단으로 이동시키고 창을 재조정한다."""
@@ -2127,7 +2330,7 @@ class MainWindow(QMainWindow):
         self._resize_window()
 
     def _on_card_delete(self, card):
-        """카드 삭제 처리 후 해시 맵과 창 크기를 갱신한다."""
+        """카드 삭제 처리 후 해시 맵, 팝업, 창 크기를 갱신한다."""
         if card.content_hash in self._content_hashes:
             del self._content_hashes[card.content_hash]
         if self.current_filepath == card.filepath:
@@ -2136,7 +2339,43 @@ class MainWindow(QMainWindow):
             self.cards.remove(card)
         card.setParent(None)
         card.deleteLater()
+        # 팝업의 동일 카드도 제거
+        self._remove_popup_card_by_filepath(card.filepath)
         QTimer.singleShot(0, self._resize_window)
+
+    def _remove_popup_card_by_filepath(self, filepath: str):
+        """팝업에서 filepath에 해당하는 카드를 찾아 제거한다."""
+        pop_card = next((c for c in self.popup.cards if c.filepath == filepath), None)
+        if pop_card:
+            self.popup.cards.remove(pop_card)
+            self.popup.cards_layout.removeWidget(pop_card)
+            pop_card.setParent(None)
+            pop_card.deleteLater()
+            if self.popup.isVisible():
+                QTimer.singleShot(0, self.popup._resize_popup)
+
+    def _on_popup_card_deleted(self, filepath: str):
+        """팝업에서 카드가 삭제되면 MainWindow의 동일 카드도 제거한다."""
+        card = next((c for c in self.cards if c.filepath == filepath), None)
+        if card:
+            if card.content_hash in self._content_hashes:
+                del self._content_hashes[card.content_hash]
+            if self.current_filepath == filepath:
+                self.current_filepath = None
+            self.cards.remove(card)
+            self.cards_layout.removeWidget(card)
+            card.setParent(None)
+            card.deleteLater()
+            QTimer.singleShot(0, self._resize_window)
+
+    def _on_popup_card_pinned(self, filepath: str, is_pinned: bool):
+        """팝업에서 핀 상태가 변경되면 MainWindow의 카드에도 반영한다."""
+        card = next((c for c in self.cards if c.filepath == filepath), None)
+        if card and card.pinned != is_pinned:
+            card.pinned = is_pinned
+            card.pin_btn.setChecked(is_pinned)
+            if is_pinned:
+                self._move_to_top(card)
 
     def _clear_all(self):
         """고정되지 않은 모든 카드를 메인 창과 팝업에서 제거한다."""
@@ -2148,18 +2387,9 @@ class MainWindow(QMainWindow):
             self.cards_layout.removeWidget(card)
             card.setParent(None)
             card.deleteLater()
-
-        removed_paths = {c.filepath for c in to_remove}
-        for card in [c for c in self.popup.cards if c.filepath in removed_paths]:
-            if card in self.popup.cards:
-                self.popup.cards.remove(card)
-            self.popup.cards_layout.removeWidget(card)
-            card.setParent(None)
-            card.deleteLater()
+            self._remove_popup_card_by_filepath(card.filepath)
 
         self._resize_window()
-        if self.popup.isVisible():
-            self.popup._resize_popup()
 
     def _trim_cards(self):
         """MAX_CARDS를 초과하면 고정되지 않은 가장 오래된 카드를 제거한다."""

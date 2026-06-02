@@ -41,6 +41,8 @@ CARD_LINE_H = 18
 CARD_TEXT_MIN = 96
 CARD_TEXT_MAX = CARD_HEIGHT_IMG
 CARD_SPACING = 4
+BOTTOM_OFFSET = 42  # 작업표시줄 위 서드파티 툴바(독)를 가리지 않기 위한 여백 (조절 가능)
+RIGHT_OFFSET = 8    # 화면 오른쪽 끝에서 띄울 여백 (조절 가능)
 
 # 클립보드 파일 저장 기본 디렉터리
 SAVE_DIR = os.path.join(os.path.expanduser("~"), "Pictures", "ClipboardSaver")
@@ -312,6 +314,50 @@ def make_zoom_icon(size: int, color_hex: str) -> QPixmap:
     p.end()
     return px
 
+def make_action_icon(icon_type: str, color_hex: str) -> QPixmap:
+    """Undo, Redo, Clear 라인아트 아이콘을 그린다."""
+    px = QPixmap(18, 18)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    c = QColor(color_hex)
+    
+    if icon_type == "undo":
+        p.setPen(QPen(c, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        # 직각으로 꺾이는 직선형 Undo 화살표 (위아래 반전)
+        p.drawLine(13, 6, 13, 11)
+        p.drawLine(13, 11, 5, 11)
+        p.drawLine(5, 11, 8, 14)
+        p.drawLine(5, 11, 8, 8)
+    elif icon_type == "redo":
+        p.setPen(QPen(c, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        # 직각으로 꺾이는 직선형 Redo 화살표 (위아래 반전)
+        p.drawLine(5, 6, 5, 11)
+        p.drawLine(5, 11, 13, 11)
+        p.drawLine(13, 11, 10, 14)
+        p.drawLine(13, 11, 10, 8)
+    elif icon_type == "clear":
+        p.setPen(QPen(c, 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.drawRoundedRect(4, 5, 10, 10, 1, 1)
+        p.drawLine(2, 5, 16, 5)
+        p.drawLine(7, 5, 7, 3)
+        p.drawLine(7, 3, 11, 3)
+        p.drawLine(11, 3, 11, 5)
+        p.drawLine(7, 8, 7, 12)
+        p.drawLine(11, 8, 11, 12)
+        
+    p.end()
+    return px
+
+def get_action_icon(icon_type: str, normal_color: str, active_color: str = None, disabled_color: str = GRAY) -> QIcon:
+    """상태(활성/비활성/호버)에 따라 색상이 변하는 QIcon을 생성한다."""
+    icon = QIcon()
+    icon.addPixmap(make_action_icon(icon_type, normal_color), QIcon.Mode.Normal)
+    if active_color:
+        icon.addPixmap(make_action_icon(icon_type, active_color), QIcon.Mode.Active)
+    icon.addPixmap(make_action_icon(icon_type, disabled_color), QIcon.Mode.Disabled)
+    return icon
+
 
 class _ResizeGrip(QWidget):
     """메인 창 오른쪽 하단에 배치되는 크기 조절 핸들."""
@@ -353,42 +399,76 @@ class _ResizeGrip(QWidget):
         p.end()
 
 
-class _DialogResizeGrip(QWidget):
-    """다이얼로그 창 오른쪽 하단에 배치되는 크기 조절 핸들."""
+class _EdgeGrip(QWidget):
+    """다이얼로그의 가장자리 및 모서리에 배치되어 모든 방향의 크기 조절을 담당하는 투명 그립."""
 
-    def __init__(self, win):
-        super().__init__()
-        self._win = win
-        self._drag_start = None
-        self._orig_size = None
-        self.setFixedSize(14, 14)
-        self.setCursor(QCursor(Qt.CursorShape.SizeFDiagCursor))
+    def __init__(self, parent, edges):
+        super().__init__(parent)
+        self.edges = edges
+        self._drag_start_pos = None
+        self._drag_start_geom = None
+        
+        if edges in ('topleft', 'bottomright'):
+            self.setCursor(QCursor(Qt.CursorShape.SizeFDiagCursor))
+        elif edges in ('topright', 'bottomleft'):
+            self.setCursor(QCursor(Qt.CursorShape.SizeBDiagCursor))
+        elif edges in ('top', 'bottom'):
+            self.setCursor(QCursor(Qt.CursorShape.SizeVerCursor))
+        elif edges in ('left', 'right'):
+            self.setCursor(QCursor(Qt.CursorShape.SizeHorCursor))
+            
+        self.setStyleSheet("background: transparent;")
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
-            self._drag_start = e.globalPosition().toPoint()
-            self._orig_size = QSize(self._win.width(), self._win.height())
+            self._drag_start_pos = e.globalPosition().toPoint()
+            self._drag_start_geom = self.window().geometry()
 
     def mouseMoveEvent(self, e):
-        if not self._drag_start or not (e.buttons() & Qt.MouseButton.LeftButton):
+        if not self._drag_start_pos or not (e.buttons() & Qt.MouseButton.LeftButton):
             return
-        d = e.globalPosition().toPoint() - self._drag_start
-        nw = max(300, self._orig_size.width() + d.x())
-        nh = max(200, self._orig_size.height() + d.y())
-        self._win.resize(nw, nh)
+        delta = e.globalPosition().toPoint() - self._drag_start_pos
+        geom = self._drag_start_geom
+        nx, ny, nw, nh = geom.x(), geom.y(), geom.width(), geom.height()
+        
+        if 'left' in self.edges:
+            nw -= delta.x()
+            nx += delta.x()
+        elif 'right' in self.edges:
+            nw += delta.x()
+            
+        if 'top' in self.edges:
+            nh -= delta.y()
+            ny += delta.y()
+        elif 'bottom' in self.edges:
+            nh += delta.y()
+            
+        min_w = max(self.window().minimumWidth(), 300)
+        min_h = max(self.window().minimumHeight(), 200)
+        
+        if nw < min_w:
+            if 'left' in self.edges: nx -= (min_w - nw)
+            nw = min_w
+        if nh < min_h:
+            if 'top' in self.edges: ny -= (min_h - nh)
+            nh = min_h
+            
+        self.window().setGeometry(nx, ny, nw, nh)
 
     def mouseReleaseEvent(self, e):
-        self._drag_start = None
-        self._orig_size = None
+        self._drag_start_pos = None
+        self._drag_start_geom = None
 
     def paintEvent(self, e):
-        """대각선 점선 그립 모양을 그린다."""
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(QPen(QColor(GRAY), 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        for i in range(1, 4):
-            p.drawLine(14 - i * 4, 14, 14, 14 - i * 4)
-        p.end()
+        """우측 하단 모서리(bottomright)일 때만 대각선 점선 그립 모양을 그린다."""
+        if self.edges == 'bottomright':
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(QPen(QColor(GRAY), 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            w, h = self.width(), self.height()
+            for i in range(1, 4):
+                p.drawLine(w - i * 4, h, w, h - i * 4)
+            p.end()
 
 
 # ── 통합 설정 다이얼로그 ──────────────────────────────────────────────────────
@@ -684,6 +764,7 @@ class DrawingCanvas(QLabel):
 
     zoom_requested = pyqtSignal(float, QPoint, QPoint)
     history_changed = pyqtSignal()  # undo/redo 가능 여부가 바뀔 때 알림
+    pan_requested = pyqtSignal(int, int)  # 휠 버튼 드래그를 통한 패닝(이동) 신호
 
     def __init__(self, pixmap):
         super().__init__()
@@ -696,6 +777,7 @@ class DrawingCanvas(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
         self.last_pos = None
+        self._pan_start = None
         self._undo_stack: list[QPixmap] = []    # 스트로크 전 스냅샷
         self._redo_stack: list[QPixmap] = []    # undo 후 redo용 스냅샷
 
@@ -751,26 +833,36 @@ class DrawingCanvas(QLabel):
             self._undo_stack.append(self.base_pixmap.copy())
             self._redo_stack.clear()
             self.last_pos = self._get_real_pos(e.position().toPoint())
+        elif e.button() == Qt.MouseButton.MiddleButton:
+            self._pan_start = e.globalPosition().toPoint()
+            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
 
     def mouseMoveEvent(self, e):
-        if not self.last_pos or not (e.buttons() & Qt.MouseButton.LeftButton):
-            return
-        real_curr = self._get_real_pos(e.position().toPoint())
-        p = QPainter(self.base_pixmap)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(QPen(
-            QColor("#ef4444"), 4,
-            Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin,
-        ))
-        p.drawLine(self.last_pos, real_curr)
-        p.end()
-        self.last_pos = real_curr
-        self.setPixmap(self.base_pixmap)
+        if (e.buttons() & Qt.MouseButton.LeftButton) and self.last_pos:
+            real_curr = self._get_real_pos(e.position().toPoint())
+            p = QPainter(self.base_pixmap)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(QPen(
+                QColor("#ef4444"), 4,
+                Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin,
+            ))
+            p.drawLine(self.last_pos, real_curr)
+            p.end()
+            self.last_pos = real_curr
+            self.setPixmap(self.base_pixmap)
+        elif (e.buttons() & Qt.MouseButton.MiddleButton) and self._pan_start is not None:
+            curr = e.globalPosition().toPoint()
+            delta = curr - self._pan_start
+            self.pan_requested.emit(delta.x(), delta.y())
+            self._pan_start = curr
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and self.last_pos is not None:
             self.last_pos = None
             self.history_changed.emit()
+        elif e.button() == Qt.MouseButton.MiddleButton:
+            self._pan_start = None
+            self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
 
 
 # ── 수정 다이얼로그 ─────────────────────────────────────────────────────────────
@@ -829,14 +921,33 @@ class TextEditDialog(QDialog):
         btn_row.addWidget(btn_new)
         l.addLayout(btn_row)
 
-        bot_w = QWidget()
-        bot_l = QHBoxLayout(bot_w)
-        bot_l.setContentsMargins(0, 0, 0, 0)
-        bot_l.addStretch()
-        bot_l.addWidget(_DialogResizeGrip(self))
-        l.addWidget(bot_w)
-
         root.addWidget(content, stretch=1)
+        self._setup_resize_grips()
+
+    def _setup_resize_grips(self):
+        self._grips = [
+            _EdgeGrip(self, 'top'), _EdgeGrip(self, 'bottom'),
+            _EdgeGrip(self, 'left'), _EdgeGrip(self, 'right'),
+            _EdgeGrip(self, 'topleft'), _EdgeGrip(self, 'topright'),
+            _EdgeGrip(self, 'bottomleft'), _EdgeGrip(self, 'bottomright')
+        ]
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if not hasattr(self, '_grips'):
+            return
+        m = 12  # 마우스로 잡기 쉬운 넉넉한 핸들 두께 마진
+        w, h = self.width(), self.height()
+        self._grips[0].setGeometry(m, 0, w - 2*m, m)
+        self._grips[1].setGeometry(m, h - m, w - 2*m, m)
+        self._grips[2].setGeometry(0, m, m, h - 2*m)
+        self._grips[3].setGeometry(w - m, m, m, h - 2*m)
+        self._grips[4].setGeometry(0, 0, m, m)
+        self._grips[5].setGeometry(w - m, 0, m, m)
+        self._grips[6].setGeometry(0, h - m, m, m)
+        self._grips[7].setGeometry(w - m, h - m, m, m)
+        for grip in self._grips:
+            grip.raise_()
 
     def _on_overwrite(self):
         self.save_mode = "overwrite"
@@ -917,9 +1028,11 @@ class DrawingDialog(QDialog):
         self.canvas = DrawingCanvas(pixmap)
         self.canvas.zoom_requested.connect(self._on_zoom_requested)
         self.canvas.history_changed.connect(self._update_history_btns)
+        self.canvas.pan_requested.connect(self._on_pan_requested)
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidget(self.canvas)
+        self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)  # 줌 아웃 시 이미지가 창 중앙에 오도록 정렬 추가
         self.scroll_area.setStyleSheet(f"""
             QScrollArea {{ border:1px solid {LINE}; background:{BG2}; }}
             QScrollBar:vertical {{ background:{BG3}; width:12px; }}
@@ -932,26 +1045,34 @@ class DrawingDialog(QDialog):
         btn_row.setSpacing(6)
 
         # ── 왼쪽: Undo / Redo / Clear ──
-        self.undo_btn = QPushButton("↩ Undo")
-        self.undo_btn.setFixedHeight(30)
-        self.redo_btn = QPushButton("↪ Redo")
-        self.redo_btn.setFixedHeight(30)
-        self.clear_btn = QPushButton("🗑 Clear")
-        self.clear_btn.setFixedHeight(30)
+        self.undo_btn = QPushButton()
+        self.undo_btn.setFixedSize(30, 30)
+        self.undo_btn.setToolTip("Undo (Ctrl+Z)")
+        self.undo_btn.setIcon(get_action_icon("undo", ACCENT))
+        self.undo_btn.setIconSize(QSize(18, 18))
+
+        self.redo_btn = QPushButton()
+        self.redo_btn.setFixedSize(30, 30)
+        self.redo_btn.setToolTip("Redo (Ctrl+Y)")
+        self.redo_btn.setIcon(get_action_icon("redo", ACCENT))
+        self.redo_btn.setIconSize(QSize(18, 18))
+
+        self.clear_btn = QPushButton()
+        self.clear_btn.setFixedSize(30, 30)
+        self.clear_btn.setToolTip("Clear All")
+        self.clear_btn.setIcon(get_action_icon("clear", "#ef4444", active_color="white"))
+        self.clear_btn.setIconSize(QSize(18, 18))
 
         _dis = (
-            f"QPushButton {{ background:{BG3}; color:{GRAY}; border:none; border-radius:4px;"
-            f" padding:0 10px; font-size:11px; }}"
+            f"QPushButton {{ background:{BG3}; border:none; border-radius:4px; }}"
         )
         _ena = (
-            f"QPushButton {{ background:{BG3}; color:{ACCENT}; border:1px solid {LINE};"
-            f" border-radius:4px; padding:0 10px; font-size:11px; }}"
-            f" QPushButton:hover {{ border-color:{ACCENT}; }}"
+            f"QPushButton {{ background:{BG3}; border:1px solid {LINE}; border-radius:4px; }}"
+            f" QPushButton:hover {{ border-color:{ACCENT}; background:{BG2}; }}"
         )
         _clr = (
-            f"QPushButton {{ background:{BG3}; color:#ef4444; border:1px solid {LINE};"
-            f" border-radius:4px; padding:0 10px; font-size:11px; }}"
-            f" QPushButton:hover {{ background:#7f1d1d; color:white; }}"
+            f"QPushButton {{ background:{BG3}; border:1px solid {LINE}; border-radius:4px; }}"
+            f" QPushButton:hover {{ background:#7f1d1d; }}"
         )
 
         self.undo_btn.setStyleSheet(_dis)
@@ -997,14 +1118,33 @@ class DrawingDialog(QDialog):
 
         l.addLayout(btn_row)
 
-        bot_w = QWidget()
-        bot_l = QHBoxLayout(bot_w)
-        bot_l.setContentsMargins(0, 0, 0, 0)
-        bot_l.addStretch()
-        bot_l.addWidget(_DialogResizeGrip(self))
-        l.addWidget(bot_w)
-
         root.addWidget(content, stretch=1)
+        self._setup_resize_grips()
+
+    def _setup_resize_grips(self):
+        self._grips = [
+            _EdgeGrip(self, 'top'), _EdgeGrip(self, 'bottom'),
+            _EdgeGrip(self, 'left'), _EdgeGrip(self, 'right'),
+            _EdgeGrip(self, 'topleft'), _EdgeGrip(self, 'topright'),
+            _EdgeGrip(self, 'bottomleft'), _EdgeGrip(self, 'bottomright')
+        ]
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if not hasattr(self, '_grips'):
+            return
+        m = 12  # 마우스로 잡기 쉬운 넉넉한 핸들 두께 마진
+        w, h = self.width(), self.height()
+        self._grips[0].setGeometry(m, 0, w - 2*m, m)
+        self._grips[1].setGeometry(m, h - m, w - 2*m, m)
+        self._grips[2].setGeometry(0, m, m, h - 2*m)
+        self._grips[3].setGeometry(w - m, m, m, h - 2*m)
+        self._grips[4].setGeometry(0, 0, m, m)
+        self._grips[5].setGeometry(w - m, 0, m, m)
+        self._grips[6].setGeometry(0, h - m, m, m)
+        self._grips[7].setGeometry(w - m, h - m, m, m)
+        for grip in self._grips:
+            grip.raise_()
 
     def _update_history_btns(self):
         """undo/redo 가능 여부에 따라 버튼 활성화 상태를 갱신한다."""
@@ -1029,47 +1169,53 @@ class DrawingDialog(QDialog):
         self.canvas.setFixedSize(nw, nh)
         self.zoom_lbl.setText(f"{int(new_scale * 100)}%")
 
-        # 이미지 크기가 줄어들면 윈도우 창도 함께 조여지도록(Shrink-to-fit) 크기 조절
-        screen = QApplication.primaryScreen().availableGeometry()
-        max_w = int(screen.width() * 0.85)
-        max_h = int(screen.height() * 0.85)
-        target_w = max(350, min(nw + 30, max_w))
-        target_h = max(250, min(nh + 120, max_h))
+        # 윈도우 창 크기를 동적으로 줄이거나 키우는 로직을 제거하여
+        # OS 수준의 윈도우 창 떨림/깜빡임(Flickering) 현상을 원천 방지합니다.
 
-        self.resize(target_w, target_h)
+        # 마우스 포인터 중심 줌을 위해 뷰포트 대비 마우스 위치를 구함
+        viewport = self.scroll_area.viewport()
+        mouse_pos_in_viewport = viewport.mapFromGlobal(global_pos)
 
-        # 크기 변환 후 캔버스 상에서 마우스가 위치해야 할 새로운 좌표
-        new_canvas_pos = QPoint(int(canvas_pos.x() * zoom_ratio), int(canvas_pos.y() * zoom_ratio))
+        # 확대/축소 후 마우스가 가리키고 있어야 할 캔버스 상의 목표 픽셀 좌표
+        new_canvas_x = canvas_pos.x() * zoom_ratio
+        new_canvas_y = canvas_pos.y() * zoom_ratio
 
-        def adjust_positions():
-            h_bar = self.scroll_area.horizontalScrollBar()
-            v_bar = self.scroll_area.verticalScrollBar()
+        # 목표 픽셀이 뷰포트 내 마우스 위치에 오도록 스크롤바 이동값 계산
+        new_h_val = int(new_canvas_x - mouse_pos_in_viewport.x())
+        new_v_val = int(new_canvas_y - mouse_pos_in_viewport.y())
 
-            current_canvas_global = self.canvas.mapToGlobal(QPoint(0, 0))
-            current_pixel_global = current_canvas_global + new_canvas_pos
+        def adjust_scrollbars():
+            self.scroll_area.horizontalScrollBar().setValue(new_h_val)
+            self.scroll_area.verticalScrollBar().setValue(new_v_val)
 
-            # 마우스 포인터 중심에서 얼마나 벗어났는지(에러) 계산
-            err_x = current_pixel_global.x() - global_pos.x()
-            err_y = current_pixel_global.y() - global_pos.y()
+        # 레이아웃 업데이트 후 스크롤바에 값 적용
+        QTimer.singleShot(0, adjust_scrollbars)
 
-            # 1차 보정: 스크롤바를 이동시켜 마우스 위치 중앙 유지
-            if h_bar.maximum() > 0:
-                old_h = h_bar.value()
-                h_bar.setValue(old_h + err_x)
-                err_x -= (h_bar.value() - old_h)  # 스크롤 가능한 범위를 초과한 잔여 오차
+    def _on_pan_requested(self, dx, dy):
+        """휠 버튼 드래그 시 스크롤바를 이동시켜 이미지를 패닝한다."""
+        h_bar = self.scroll_area.horizontalScrollBar()
+        v_bar = self.scroll_area.verticalScrollBar()
+        h_bar.setValue(h_bar.value() - dx)
+        v_bar.setValue(v_bar.value() - dy)
 
-            if v_bar.maximum() > 0:
-                old_v = v_bar.value()
-                v_bar.setValue(old_v + err_y)
-                err_y -= (v_bar.value() - old_v)
-
-            # 2차 보정: 스크롤바가 한계에 도달했거나 창과 이미지가 타이트하게 붙어 스크롤이 불가능할 경우,
-            # 윈도우 창 자체를 이동시켜 마우스 포인터 위치를 중심(고정)으로 보정
-            if err_x != 0 or err_y != 0:
-                self.move(self.x() - err_x, self.y() - err_y)
-
-        # 레이아웃과 캔버스 리사이징이 렌더링에 완전히 반영된 직후 스크롤/창 위치 보정
-        QTimer.singleShot(0, adjust_positions)
+    def keyPressEvent(self, e):
+        """단축키(Ctrl+Z, Ctrl+Y)로 Undo/Redo를 지원한다."""
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if e.key() == Qt.Key.Key_Z:
+                if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    if self.canvas.can_redo():
+                        self.canvas.redo()
+                else:
+                    if self.canvas.can_undo():
+                        self.canvas.undo()
+                e.accept()
+                return
+            elif e.key() == Qt.Key.Key_Y:
+                if self.canvas.can_redo():
+                    self.canvas.redo()
+                e.accept()
+                return
+        super().keyPressEvent(e)
 
     @property
     def pixmap(self):
@@ -1496,7 +1642,7 @@ class ToastItem(QWidget):
 class ToastManager:
     """여러 ToastItem을 우하단에 위로 쌓아 표시하는 관리자."""
 
-    MARGIN = 8
+    MARGIN = 8  # 항목 간 위아래 간격 등으로 사용
     GAP    = 6
 
     def __init__(self):
@@ -1525,11 +1671,12 @@ class ToastManager:
     def _reposition(self):
         """쌓인 순서대로 우하단에서 위쪽으로 배치한다."""
         screen = QApplication.primaryScreen().availableGeometry()
-        y = screen.bottom() - self.MARGIN
+        # 하단 여백에 전역 변수 BOTTOM_OFFSET을 추가하여 툴바 위에 딱 맞게 배치
+        y = screen.bottom() - self.MARGIN - BOTTOM_OFFSET
         for item in reversed(self._items):
-            # item.adjustSize()  <-- 반복적인 사이즈 재계산을 방지하기 위해 삭제 (이미 고정됨)
             y -= item.height()
-            x = screen.right() - item.width() - self.MARGIN
+            # 오른쪽 여백에 전역 변수 RIGHT_OFFSET 적용
+            x = screen.right() - item.width() - RIGHT_OFFSET
             item.move(x, y)
             y -= self.GAP
 
@@ -1967,7 +2114,8 @@ class MainWindow(QMainWindow):
         w = max(self.width(), 220)
         screen = QApplication.primaryScreen().availableGeometry()
         self.resize(w, new_h)
-        self.move(screen.right() - w, screen.bottom() - new_h)
+        # 메인 창 역시 전역 변수 RIGHT_OFFSET과 BOTTOM_OFFSET을 사용하여 여백 적용
+        self.move(screen.right() - w - RIGHT_OFFSET, screen.bottom() - new_h - BOTTOM_OFFSET)
 
     def _build_ui(self):
         """메인 창의 전체 UI 레이아웃(타이틀바, 헤더, 카드 영역, 경로 바)을 구성한다."""

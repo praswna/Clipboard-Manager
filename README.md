@@ -4,6 +4,12 @@ Windows용 클립보드 히스토리 매니저 — PyQt6 기반 다크 테마 UI
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Windows](https://img.shields.io/badge/Windows-10%2F11-lightgrey)
 
+## 스크린샷
+
+| 팝업 | 메인 창 |
+|:----:|:-------:|
+| ![popup](clip_20260603_220636.png) | ![main](clip_20260603_220659.png) |
+
 ## 기능
 
 - 복사한 텍스트 · 이미지를 자동으로 카드 형태로 저장
@@ -13,13 +19,13 @@ Windows용 클립보드 히스토리 매니저 — PyQt6 기반 다크 테마 UI
 - 핀 고정 — 상단 유지 및 삭제 방지
 - 중복 감지 — 동일 내용 재복사 시 기존 카드 상단 이동
 - 멀티모니터 지원 — 커서가 있는 모니터에 팝업 표시
-- 시스템 트레이 최소화 / Windows 시작프로그램 등록
+- Windows 시작프로그램 등록
 - 파일 저장 경로: `~/Pictures/ClipboardSaver`
 
 ## 설치 및 실행
 
 ### 실행 파일 (권장)
-`dist/ClipboardManager.exe` 를 직접 실행
+[Releases](../../releases) 에서 `ClipboardManager.exe` 다운로드 후 바로 실행
 
 ### 소스에서 실행
 ```bash
@@ -34,7 +40,6 @@ python clipboard_manager.py
 | 항목 | 설명 |
 |------|------|
 | 자동 실행 | Windows 시작 시 자동 실행 |
-| 시작 시 트레이 | 실행 시 트레이로 최소화 |
 | 팝업 단축키 | CapsLock 외 원하는 키로 변경 |
 
 ## 요구 사항

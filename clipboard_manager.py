@@ -9,7 +9,7 @@ import time
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QScrollArea, QVBoxLayout, QHBoxLayout, QFrame, QLineEdit,
-    QTextEdit, QSystemTrayIcon, QMenu, QDialog, QCheckBox,
+    QTextEdit, QMenu, QDialog, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QMimeData, QUrl, QPoint, QSize, QEvent, pyqtSignal, QThread
 from PyQt6.QtGui import (
@@ -266,7 +266,12 @@ def _set_foreground_window(hwnd):
 
 
 def make_icon() -> QIcon:
-    """클립보드 모양의 애플리케이션 아이콘을 생성한다."""
+    """app_icon.png 파일을 로드하여 아이콘으로 반환한다. (PyInstaller 번들 경로 대응)"""
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(base, "app_icon.png")
+    if os.path.exists(path):
+        return QIcon(path)
+    # 파일 없을 경우 기본 아이콘 폴백
     px = QPixmap(64, 64)
     px.fill(Qt.GlobalColor.transparent)
     p = QPainter(px)
@@ -543,12 +548,7 @@ class SettingsDialog(QDialog):
         self.chk_autostart.setStyleSheet(chk_style)
         self.chk_autostart.setChecked(is_autostart_enabled())
 
-        self.chk_tray = QCheckBox("시작 시 트레이로 최소화")
-        self.chk_tray.setStyleSheet(chk_style)
-        self.chk_tray.setChecked(is_start_minimized())
-
         bl.addWidget(self.chk_autostart)
-        bl.addWidget(self.chk_tray)
 
         # 구분선
         div = QFrame()
@@ -640,7 +640,6 @@ class SettingsDialog(QDialog):
     def _apply(self):
         """설정 값을 레지스트리에 저장하고 다이얼로그를 닫는다."""
         set_autostart(self.chk_autostart.isChecked())
-        set_start_minimized(self.chk_tray.isChecked())
         set_hotkey_vk(self._pending_vk)
         self._win._on_hotkey_changed(self._pending_vk)
         self.accept()
@@ -1994,14 +1993,6 @@ class TitleBar(QWidget):
         gear_btn.setToolTip("설정")
         gear_btn.clicked.connect(self._open_settings)
 
-        win_min_btn = QPushButton("─")
-        win_min_btn.setFixedSize(26, 20)
-        win_min_btn.setStyleSheet(
-            f"QPushButton {{ background:transparent; color:{GRAY}; border:none; font-size:11px; }}"
-            f" QPushButton:hover {{ background:{BG3}; color:{ACCENT}; }}"
-        )
-        win_min_btn.clicked.connect(win._minimize_to_tray)
-
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(26, 20)
         close_btn.setStyleSheet(
@@ -2011,7 +2002,6 @@ class TitleBar(QWidget):
         close_btn.clicked.connect(QApplication.quit)
 
         l.addWidget(gear_btn)
-        l.addWidget(win_min_btn)
         l.addWidget(close_btn)
 
     def _make_gear_icon(self):
@@ -2066,7 +2056,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+            Qt.WindowType.FramelessWindowHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setWindowTitle("Clipboard Manager")
@@ -2092,7 +2082,6 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._setup_timers()
-        self._setup_tray()
         self._resize_window()
 
     def _resize_window(self):
@@ -2267,36 +2256,6 @@ class MainWindow(QMainWindow):
         except Exception:
             self.path_edit.setText(self.save_dir)
 
-    def _setup_tray(self):
-        """시스템 트레이 아이콘과 컨텍스트 메뉴를 초기화한다."""
-        self.tray = QSystemTrayIcon(make_icon(), self)
-        menu = QMenu()
-        show_act = QAction("열기", self)
-        show_act.triggered.connect(
-            lambda: (self.show(), self.raise_(), self.activateWindow(), self._resize_window())
-        )
-        settings_act = QAction("설정", self)
-        settings_act.triggered.connect(self._open_tray_settings)
-        quit_act = QAction("종료", self)
-        quit_act.triggered.connect(QApplication.quit)
-        menu.addAction(show_act)
-        menu.addAction(settings_act)
-        menu.addSeparator()
-        menu.addAction(quit_act)
-        self.tray.setContextMenu(menu)
-        self.tray.activated.connect(
-            lambda r: show_act.trigger() if r == QSystemTrayIcon.ActivationReason.DoubleClick else None
-        )
-        self.tray.show()
-
-    def _open_tray_settings(self):
-        """트레이 메뉴에서 설정 다이얼로그를 화면 오른쪽 하단에 열어 준다."""
-        dlg = SettingsDialog(self)
-        dlg.adjustSize()
-        screen = QApplication.primaryScreen().availableGeometry()
-        dlg.move(screen.right() - dlg.width() - 10, screen.bottom() - dlg.sizeHint().height() - 10)
-        dlg.exec()
-
     def _setup_timers(self):
         """클립보드 감시 디바운스 타이머, 상태 점 깜빡임, 단축키 폴링 타이머를 초기화한다."""
         self.clipboard = QApplication.clipboard()
@@ -2345,7 +2304,11 @@ class MainWindow(QMainWindow):
             toggle = bool(ctypes.windll.user32.GetKeyState(vk) & 0x0001)
             if toggle != self._caps_toggle_state:
                 self._caps_toggle_state = toggle
-                self.popup.hide() if self.popup.isVisible() else self.popup.show_at_cursor()
+                if self.popup.isVisible():
+                    if self.popup.auto_close:  # 핀 고정 중이면 단축키로 닫지 않음
+                        self.popup.hide()
+                else:
+                    self.popup.show_at_cursor()
         else:
             # 일반 키: 물리 누름 엣지 감지
             state = ctypes.windll.user32.GetAsyncKeyState(vk)
@@ -2353,7 +2316,11 @@ class MainWindow(QMainWindow):
             pressed_since_last = bool(state & 0x0001)
 
             if (currently_down and not self._caps_was_down) or (pressed_since_last and not currently_down):
-                self.popup.hide() if self.popup.isVisible() else self.popup.show_at_cursor()
+                if self.popup.isVisible():
+                    if self.popup.auto_close:  # 핀 고정 중이면 단축키로 닫지 않음
+                        self.popup.hide()
+                else:
+                    self.popup.show_at_cursor()
 
             self._caps_was_down = currently_down
 
@@ -2394,7 +2361,6 @@ class MainWindow(QMainWindow):
 
     def _check_clipboard(self):
         """클립보드 변경을 감지하여 이미지/텍스트를 비동기 워커에 전달한다."""
-        # 디바운스 대기 시간을 고려하여 내부 복사 무시 시간을 0.5초에서 1.0초로 연장
         if time.time() - self._internal_copy_time < 1.0:
             return
 
@@ -2402,7 +2368,26 @@ class MainWindow(QMainWindow):
             self.clipboard.blockSignals(True)
             img = self.clipboard.image()
 
+            # 이미지가 null이지만 클립보드에 이미지 포맷이 있으면
+            # 어피니티 등 지연 렌더링 앱 대응 — 최대 3회까지 500ms 간격으로 재시도
+            if img.isNull():
+                mime = self.clipboard.mimeData()
+                has_img_fmt = mime and any(
+                    f in mime.formats()
+                    for f in ["image/png", "image/bmp", "image/jpeg",
+                              "application/x-qt-image", "PNG", "DIB", "BITMAP"]
+                )
+                if has_img_fmt:
+                    retry = getattr(self, "_img_retry", 0)
+                    if retry < 3:
+                        self._img_retry = retry + 1
+                        self.clipboard.blockSignals(False)
+                        QTimer.singleShot(500, self._check_clipboard)
+                        return
+                self._img_retry = 0
+
             if not img.isNull():
+                self._img_retry = 0
                 # 메인 스레드에서 즉시 해시를 계산하여 중복 감지 레이스 컨디션 완벽 차단
                 # (memoryview를 활용하여 불필요한 배열 복사 비용을 없애 성능 개선)
                 b = img.constBits()
@@ -2623,15 +2608,6 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         QTimer.singleShot(200, lambda: set_titlebar_color(int(self.winId()), TITLE))
 
-    def _minimize_to_tray(self):
-        """창을 숨기고 트레이 알림을 표시한다."""
-        self.hide()
-        self.tray.showMessage(
-            "Clipboard Manager",
-            "트레이에서 실행 중입니다.",
-            QSystemTrayIcon.MessageIcon.Information,
-            2000,
-        )
 
 
 def main():
@@ -2652,8 +2628,7 @@ def main():
     app.setPalette(palette)
 
     win = MainWindow()
-    # 시작 최소화 설정에 따라 트레이로 바로 숨김 처리
-    QTimer.singleShot(0, lambda: (win.show(), win.hide()))
+    win.show()
     sys.exit(app.exec())
 
 

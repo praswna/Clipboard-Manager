@@ -2664,6 +2664,7 @@ def main():
 
     win = MainWindow()
     win.show()
+    app.aboutToQuit.connect(lambda: os._exit(0))
     sys.exit(app.exec())
 
 
